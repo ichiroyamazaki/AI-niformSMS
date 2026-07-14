@@ -625,6 +625,133 @@ def send_combined_notification(email, phone, student_name, grade, timestamp, act
     
     return email_success, sms_success
 
+def send_violation_cleared_email(to_email, student_name, grade, timestamp, recipient_type="student"):
+    """
+    Send email notification when violation count is cleared back to zero after completing community service
+    """
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = to_email
+        msg['Subject'] = "Your Violation Count Has Been Cleared"
+        
+        # Email body
+        body = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background-color: #28a745; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                .content {{ background-color: #f8f9fa; padding: 20px; border-radius: 0 0 5px 5px; }}
+                .success-box {{ background-color: #d4edda; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #28a745; }}
+                .footer {{ text-align: center; margin-top: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>✅ Violation Count Cleared</h2>
+                </div>
+                <div class="content">
+                    <p>Dear {"Parent" if recipient_type == "parents" else student_name},</p>
+                    
+                    <div class="success-box">
+                        <p style="margin: 0; color: #155724; font-size: 16px; font-weight: bold;">🎉 Congratulations!</p>
+                        <p style="margin: 10px 0 0 0; color: #155724;">
+                            {"Your child" if recipient_type == "parents" else "You"} have successfully completed the Community Service requirement.
+                        </p>
+                        <p style="margin: 10px 0 0 0; color: #155724;">
+                            {"Your child's" if recipient_type == "parents" else "Your"} violation count has been cleared back to <strong>zero</strong>.
+                        </p>
+                    </div>
+                    
+                    <p><strong>Student Name:</strong> {student_name}</p>
+                    <p><strong>Grade Level:</strong> {grade}</p>
+                    <p><strong>Cleared At:</strong> {timestamp}</p>
+                    
+                    <p style="margin-top: 20px;">
+                        {"Your child" if recipient_type == "parents" else "You"} can now start fresh with a clean record. 
+                        Please continue to follow school policies to maintain this status.
+                    </p>
+                    
+                    <p>Thank you for your cooperation.</p>
+                    
+                    <div class="footer">
+                        <p>This is an automated notification from AI-niform Technology</p>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        # Send email
+        with smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✅ Violation cleared email sent to {to_email}: {student_name} ({grade})")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error sending violation cleared email: {str(e)}")
+        return False
+
+def send_violation_cleared_sms(to_phone, student_name, grade, timestamp, recipient_type="student"):
+    """
+    Send SMS notification when violation count is cleared back to zero after completing community service
+    """
+    # Format phone number for Philippines
+    if not to_phone.startswith('+63'):
+        if to_phone.startswith('0'):
+            to_phone = '+63' + to_phone[1:]
+        elif to_phone.startswith('63'):
+            to_phone = '+' + to_phone
+        else:
+            to_phone = '+63' + to_phone
+    
+    if recipient_type == "student":
+        message = f"Hi {student_name}! Congratulations! You have successfully completed Community Service. Your violation count has been cleared back to zero. You can now start fresh with a clean record. Cleared at: {timestamp}\n\nPowered by AI-niform Technology"
+    else:  # parents
+        message = f"Dear Parent, {student_name} ({grade}) has successfully completed Community Service. Your child's violation count has been cleared back to zero. Cleared at: {timestamp}\n\nPowered by AI-niform Technology"
+    
+    data = {
+        'recipient': to_phone,
+        'sender_id': PHILSMS_SENDER_NAME,
+        'type': 'plain',
+        'message': message
+    }
+    
+    headers = {
+        'Authorization': f'Bearer {PHILSMS_API_TOKEN}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+    
+    try:
+        response = requests.post(PHILSMS_URL, json=data, headers=headers)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status') == 'success':
+                print(f"✅ Violation cleared SMS sent to {to_phone}: {student_name} ({grade})")
+                return True
+            else:
+                print(f"❌ Violation cleared SMS failed: {result.get('message', 'Unknown error')}")
+                return False
+        else:
+            print(f"❌ HTTP Error {response.status_code}: {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error sending violation cleared SMS: {str(e)}")
+        return False
+
 # --- Firebase setup ---
 def initialize_firebase():
     """
@@ -1085,6 +1212,15 @@ _force_refresh_flag = False  # Flag to force refresh on next cycle
 # Global violation count cache (from student_violations parent documents)
 _violation_count_cache = {}
 
+# Global dictionary to track previous violation counts for detecting resets
+_previous_violation_counts = {}  # Format: {student_id: previous_count}
+
+# Cache file paths
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+VIOLATION_COUNT_CACHE_FILE = os.path.join(CACHE_DIR, "violation_count_cache.json")
+PREVIOUS_VIOLATION_COUNTS_FILE = os.path.join(CACHE_DIR, "previous_violation_counts.json")
+STUDENT_VIOLATIONS_CACHE_FILE = os.path.join(CACHE_DIR, "student_violations_cache.json")  # Full student_violations data backup
+
 def fetch_all_undelivered_activities():
     """
     Fetch ALL activities from student_activities collection where message=false AND date is today
@@ -1335,6 +1471,237 @@ def update_activity_message_status(activity_id, status="true"):
         print(f"[ERROR] Error updating message status for activity {activity_id}: {str(e)}")
         return False
 
+def is_shs_student(student_info):
+    """
+    Check if a student is SHS (Senior High School) based on their grade/course information.
+    
+    Args:
+        student_info: Dictionary containing student information
+    
+    Returns:
+        True if student is SHS, False otherwise
+    """
+    if not student_info:
+        return False
+    
+    # Get grade/course from various possible field names
+    grade = student_info.get('Course', student_info.get('course', student_info.get('grade', student_info.get('grade_level', student_info.get('Grade', '')))))
+    
+    if not grade:
+        return False
+    
+    grade_str = str(grade).upper()
+    
+    # Check for SHS indicators (Senior High School, Grade 11, Grade 12, SHS, etc.)
+    shs_indicators = ['SHS', 'SENIOR HIGH', 'SENIOR HIGH SCHOOL', 'GRADE 11', 'GRADE 12', 'G11', 'G12', '11TH', '12TH']
+    
+    # Check if grade contains any SHS indicator
+    for indicator in shs_indicators:
+        if indicator in grade_str:
+            return True
+    
+    # Also check for specific grade numbers (11 or 12)
+    if '11' in grade_str or '12' in grade_str:
+        # But exclude if it's clearly not SHS (e.g., "Grade 1-1" or similar)
+        if 'GRADE 11' in grade_str or 'GRADE 12' in grade_str or 'G11' in grade_str or 'G12' in grade_str:
+            return True
+    
+    return False
+
+def has_checked_in_today(student_id, exclude_activity_id=None):
+    """
+    Check if a non-SHS student has already checked in today.
+    Checks activities where message="true" (already processed) OR message="false" (being processed in same cycle).
+    
+    Args:
+        student_id: The student ID to check
+        exclude_activity_id: Activity ID to exclude from check (current activity being processed)
+    
+    Returns:
+        True if student has already checked in today, False otherwise
+    """
+    try:
+        db = initialize_firebase()
+        student_activities_ref = db.collection("student_activities")
+        
+        # Get today's date in Asia/Manila timezone
+        ph_tz = pytz.timezone('Asia/Manila')
+        today = datetime.now(ph_tz).date()
+        
+        # Helper function to check if timestamp is from today
+        def is_today(timestamp):
+            if timestamp is None:
+                return False
+            try:
+                if isinstance(timestamp, datetime):
+                    if timestamp.tzinfo is None:
+                        timestamp = ph_tz.localize(timestamp)
+                    else:
+                        timestamp = timestamp.astimezone(ph_tz)
+                    return timestamp.date() == today
+                elif isinstance(timestamp, str):
+                    try:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = ph_tz.localize(dt)
+                        else:
+                            dt = dt.astimezone(ph_tz)
+                        return dt.date() == today
+                    except:
+                        try:
+                            dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                            dt = ph_tz.localize(dt)
+                            return dt.date() == today
+                        except:
+                            return str(today) in timestamp or today.strftime("%Y-%m-%d") in timestamp
+                return False
+            except:
+                return False
+        
+        # Query for check-in activities for this student today
+        # Check both message="true" (already processed) and message="false" (being processed in same cycle)
+        check_in_types = ['check-in', 'check_in', 'checkin', 'time_in', 'time-in', 'timein']
+        
+        # Try student_id field - check message="true" first
+        for message_status in ["true", "false"]:
+            try:
+                activities_query = student_activities_ref.where(filter=FieldFilter('student_id', '==', str(student_id))).where(filter=FieldFilter('message', '==', message_status)).stream()
+                for doc in activities_query:
+                    if exclude_activity_id and doc.id == exclude_activity_id:
+                        continue
+                    activity_data = doc.to_dict()
+                    activity_type = activity_data.get('activity_type') or activity_data.get('action_type') or activity_data.get('type', '')
+                    activity_type_lower = activity_type.lower() if activity_type else ''
+                    
+                    # Check if it's a check-in
+                    if activity_type_lower in check_in_types:
+                        timestamp = activity_data.get('timestamp') or activity_data.get('recorded_at') or activity_data.get('time')
+                        if is_today(timestamp):
+                            return True
+            except:
+                pass
+        
+        # Try student_number field - check message="true" first
+        for message_status in ["true", "false"]:
+            try:
+                activities_query = student_activities_ref.where(filter=FieldFilter('student_number', '==', str(student_id))).where(filter=FieldFilter('message', '==', message_status)).stream()
+                for doc in activities_query:
+                    if exclude_activity_id and doc.id == exclude_activity_id:
+                        continue
+                    activity_data = doc.to_dict()
+                    activity_type = activity_data.get('activity_type') or activity_data.get('action_type') or activity_data.get('type', '')
+                    activity_type_lower = activity_type.lower() if activity_type else ''
+                    
+                    # Check if it's a check-in
+                    if activity_type_lower in check_in_types:
+                        timestamp = activity_data.get('timestamp') or activity_data.get('recorded_at') or activity_data.get('time')
+                        if is_today(timestamp):
+                            return True
+            except:
+                pass
+        
+        return False
+    except Exception as e:
+        print(f"[ERROR] Error checking check-in status for student {student_id}: {str(e)}")
+        return False  # On error, allow the check-in (fail open)
+
+def has_checked_out_today(student_id, exclude_activity_id=None):
+    """
+    Check if a non-SHS student has already checked out today.
+    Checks activities where message="true" (already processed) OR message="false" (being processed in same cycle).
+    
+    Args:
+        student_id: The student ID to check
+        exclude_activity_id: Activity ID to exclude from check (current activity being processed)
+    
+    Returns:
+        True if student has already checked out today, False otherwise
+    """
+    try:
+        db = initialize_firebase()
+        student_activities_ref = db.collection("student_activities")
+        
+        # Get today's date in Asia/Manila timezone
+        ph_tz = pytz.timezone('Asia/Manila')
+        today = datetime.now(ph_tz).date()
+        
+        # Helper function to check if timestamp is from today
+        def is_today(timestamp):
+            if timestamp is None:
+                return False
+            try:
+                if isinstance(timestamp, datetime):
+                    if timestamp.tzinfo is None:
+                        timestamp = ph_tz.localize(timestamp)
+                    else:
+                        timestamp = timestamp.astimezone(ph_tz)
+                    return timestamp.date() == today
+                elif isinstance(timestamp, str):
+                    try:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = ph_tz.localize(dt)
+                        else:
+                            dt = dt.astimezone(ph_tz)
+                        return dt.date() == today
+                    except:
+                        try:
+                            dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                            dt = ph_tz.localize(dt)
+                            return dt.date() == today
+                        except:
+                            return str(today) in timestamp or today.strftime("%Y-%m-%d") in timestamp
+                return False
+            except:
+                return False
+        
+        # Query for check-out activities for this student today
+        # Check both message="true" (already processed) and message="false" (being processed in same cycle)
+        check_out_types = ['check-out', 'check_out', 'checkout', 'time_out', 'time-out', 'timeout']
+        
+        # Try student_id field - check message="true" first
+        for message_status in ["true", "false"]:
+            try:
+                activities_query = student_activities_ref.where(filter=FieldFilter('student_id', '==', str(student_id))).where(filter=FieldFilter('message', '==', message_status)).stream()
+                for doc in activities_query:
+                    if exclude_activity_id and doc.id == exclude_activity_id:
+                        continue
+                    activity_data = doc.to_dict()
+                    activity_type = activity_data.get('activity_type') or activity_data.get('action_type') or activity_data.get('type', '')
+                    activity_type_lower = activity_type.lower() if activity_type else ''
+                    
+                    # Check if it's a check-out
+                    if activity_type_lower in check_out_types:
+                        timestamp = activity_data.get('timestamp') or activity_data.get('recorded_at') or activity_data.get('time')
+                        if is_today(timestamp):
+                            return True
+            except:
+                pass
+        
+        # Try student_number field - check message="true" first
+        for message_status in ["true", "false"]:
+            try:
+                activities_query = student_activities_ref.where(filter=FieldFilter('student_number', '==', str(student_id))).where(filter=FieldFilter('message', '==', message_status)).stream()
+                for doc in activities_query:
+                    if exclude_activity_id and doc.id == exclude_activity_id:
+                        continue
+                    activity_data = doc.to_dict()
+                    activity_type = activity_data.get('activity_type') or activity_data.get('action_type') or activity_data.get('type', '')
+                    activity_type_lower = activity_type.lower() if activity_type else ''
+                    
+                    # Check if it's a check-out
+                    if activity_type_lower in check_out_types:
+                        timestamp = activity_data.get('timestamp') or activity_data.get('recorded_at') or activity_data.get('time')
+                        if is_today(timestamp):
+                            return True
+            except:
+                pass
+        
+        return False
+    except Exception as e:
+        print(f"[ERROR] Error checking check-out status for student {student_id}: {str(e)}")
+        return False  # On error, allow the check-out (fail open)
+
 def get_violation_count_from_parent(student_id, use_cache=True):
     """
     Get violation_count from student_violations parent document
@@ -1421,6 +1788,394 @@ def get_last_violation_type_from_parent(student_id, use_cache=True):
     except Exception as e:
         print(f"[ERROR] Error fetching last_violation_type for student {student_id}: {str(e)}")
         return ''  # Default to empty string if error
+
+def save_student_violations_cache():
+    """
+    Save full student_violations data from Firebase to local cache file.
+    This serves as a backup to detect if the database is cleared or reset.
+    
+    Returns:
+        Dictionary of student_violations data: {student_id: {violation_count, student_name, grade, last_updated, ...}}
+    """
+    try:
+        db = initialize_firebase()
+        student_violations_ref = db.collection("student_violations")
+        all_docs = student_violations_ref.stream()
+        
+        student_violations_data = {}
+        for doc in all_docs:
+            student_id = doc.id
+            parent_data = doc.to_dict()
+            # Save all relevant data from the document
+            student_violations_data[student_id] = {
+                'violation_count': parent_data.get('violation_count', 0),
+                'student_name': parent_data.get('student_name', ''),
+                'grade': parent_data.get('grade', ''),
+                'last_updated': parent_data.get('last_updated', ''),
+                'last_violation_type': parent_data.get('last_violation_type', ''),
+                'student_number': parent_data.get('student_number', student_id),
+                'cached_at': datetime.now(pytz.timezone('Asia/Manila')).isoformat()
+            }
+        
+        return student_violations_data
+    except Exception as e:
+        print(f"[ERROR] Error saving student_violations cache: {str(e)}")
+        return {}
+
+def save_cache_to_file(verbose=True):
+    """
+    Save cache dictionaries to local JSON files for persistence across restarts.
+    Saves violation_count_cache, previous_violation_counts, and full student_violations backup.
+    
+    Args:
+        verbose: If True, prints save messages. If False, only prints on errors.
+    """
+    global _violation_count_cache, _previous_violation_counts
+    
+    try:
+        # Create cache directory if it doesn't exist
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        
+        # Save violation_count_cache
+        try:
+            with open(VIOLATION_COUNT_CACHE_FILE, 'w') as f:
+                json.dump(_violation_count_cache, f, indent=2)
+            if verbose:
+                print(f"   💾 Saved violation count cache to {VIOLATION_COUNT_CACHE_FILE}")
+        except Exception as e:
+            print(f"   ⚠️  Error saving violation count cache: {str(e)}")
+        
+        # Save previous_violation_counts
+        try:
+            with open(PREVIOUS_VIOLATION_COUNTS_FILE, 'w') as f:
+                json.dump(_previous_violation_counts, f, indent=2)
+            if verbose:
+                print(f"   💾 Saved previous violation counts to {PREVIOUS_VIOLATION_COUNTS_FILE}")
+        except Exception as e:
+            print(f"   ⚠️  Error saving previous violation counts: {str(e)}")
+        
+        # Save full student_violations backup
+        try:
+            student_violations_data = save_student_violations_cache()
+            with open(STUDENT_VIOLATIONS_CACHE_FILE, 'w') as f:
+                json.dump(student_violations_data, f, indent=2)
+            if verbose:
+                print(f"   💾 Saved student_violations backup to {STUDENT_VIOLATIONS_CACHE_FILE} ({len(student_violations_data)} students)")
+        except Exception as e:
+            print(f"   ⚠️  Error saving student_violations backup: {str(e)}")
+        
+        return True
+    except Exception as e:
+        print(f"   ⚠️  Error saving cache to file: {str(e)}")
+        return False
+
+def load_cache_from_file():
+    """
+    Load cache dictionaries from local JSON files.
+    Loads violation_count_cache, previous_violation_counts, and student_violations backup.
+    Returns tuple: (violation_count_cache_dict, previous_violation_counts_dict, student_violations_backup_dict)
+    """
+    global _violation_count_cache, _previous_violation_counts
+    
+    violation_count_cache = {}
+    previous_violation_counts = {}
+    student_violations_backup = {}
+    
+    # Load violation_count_cache
+    if os.path.exists(VIOLATION_COUNT_CACHE_FILE):
+        try:
+            with open(VIOLATION_COUNT_CACHE_FILE, 'r') as f:
+                violation_count_cache = json.load(f)
+                # Convert string keys to appropriate types if needed
+                violation_count_cache = {str(k): int(v) if isinstance(v, (int, str)) and str(v).isdigit() else v 
+                                         for k, v in violation_count_cache.items()}
+            print(f"   📂 Loaded violation count cache from {VIOLATION_COUNT_CACHE_FILE} ({len(violation_count_cache)} entries)")
+        except Exception as e:
+            print(f"   ⚠️  Error loading violation count cache: {str(e)}")
+            violation_count_cache = {}
+    else:
+        print(f"   ℹ️  Violation count cache file not found: {VIOLATION_COUNT_CACHE_FILE}")
+    
+    # Load previous_violation_counts
+    if os.path.exists(PREVIOUS_VIOLATION_COUNTS_FILE):
+        try:
+            with open(PREVIOUS_VIOLATION_COUNTS_FILE, 'r') as f:
+                previous_violation_counts = json.load(f)
+                # Convert string keys to appropriate types if needed
+                previous_violation_counts = {str(k): int(v) if isinstance(v, (int, str)) and str(v).isdigit() else v 
+                                            for k, v in previous_violation_counts.items()}
+            print(f"   📂 Loaded previous violation counts from {PREVIOUS_VIOLATION_COUNTS_FILE} ({len(previous_violation_counts)} entries)")
+        except Exception as e:
+            print(f"   ⚠️  Error loading previous violation counts: {str(e)}")
+            previous_violation_counts = {}
+    else:
+        print(f"   ℹ️  Previous violation counts file not found: {PREVIOUS_VIOLATION_COUNTS_FILE}")
+    
+    # Load student_violations backup
+    if os.path.exists(STUDENT_VIOLATIONS_CACHE_FILE):
+        try:
+            with open(STUDENT_VIOLATIONS_CACHE_FILE, 'r') as f:
+                student_violations_backup = json.load(f)
+            print(f"   📂 Loaded student_violations backup from {STUDENT_VIOLATIONS_CACHE_FILE} ({len(student_violations_backup)} entries)")
+        except Exception as e:
+            print(f"   ⚠️  Error loading student_violations backup: {str(e)}")
+            student_violations_backup = {}
+    else:
+        print(f"   ℹ️  Student violations backup file not found: {STUDENT_VIOLATIONS_CACHE_FILE}")
+    
+    return violation_count_cache, previous_violation_counts, student_violations_backup
+
+def check_and_notify_violation_resets():
+    """
+    Check all students in student_violations collection for violation count resets.
+    Detects when violation_count changes from any value > 0 to 0 (community service completed or database cleared).
+    Compares with local cache backup to detect if database was cleared.
+    Sends notifications to students and parents when detected.
+    
+    Returns:
+        Number of students notified
+    """
+    global _previous_violation_counts, _violation_count_cache
+    
+    try:
+        db = initialize_firebase()
+        student_violations_ref = db.collection("student_violations")
+        
+        # Load local backup cache for comparison
+        _, _, student_violations_backup = load_cache_from_file()
+        
+        # Get all student_violations documents from Firebase
+        all_docs = student_violations_ref.stream()
+        
+        ph_tz = pytz.timezone('Asia/Manila')
+        current_time = datetime.now(ph_tz).strftime("%Y-%m-%d %H:%M:%S Manila Time")
+        
+        notified_count = 0
+        current_student_ids = set()  # Track which students exist in current database
+        
+        for doc in all_docs:
+            student_id = doc.id
+            current_student_ids.add(student_id)
+            parent_data = doc.to_dict()
+            
+            # Get current violation count
+            current_count = parent_data.get('violation_count', 0)
+            current_count = int(current_count) if current_count else 0
+            
+            # Get previous violation count from tracking dictionary
+            previous_count = _previous_violation_counts.get(student_id, None)
+            
+            # Also check local backup cache (in case database was cleared and restored)
+            backup_data = student_violations_backup.get(student_id, {})
+            backup_count = backup_data.get('violation_count', 0) if backup_data else 0
+            backup_count = int(backup_count) if backup_count else 0
+            
+            # Use the highest previous count (from either tracking or backup) for comparison
+            # This ensures we detect resets even if the database was cleared
+            effective_previous_count = previous_count
+            if backup_count > 0 and (previous_count is None or backup_count > previous_count):
+                effective_previous_count = backup_count
+            
+            # Check if violation count was reset from any value > 0 to 0
+            # This catches both community service completion (3+ to 0) and database clears (any to 0)
+            if effective_previous_count is not None and effective_previous_count > 0 and current_count == 0:
+                # Violation count was reset! Send notification
+                print(f"\n   🎉 Detected violation count reset for student {student_id}: {effective_previous_count} → {current_count}")
+                if backup_count > 0 and backup_count != previous_count:
+                    print(f"   ℹ️  Reset detected using backup cache (database may have been cleared)")
+                
+                # Get student information from students collection
+                student_info = get_student_by_id(student_id, use_cache=True)
+                
+                if not student_info:
+                    # Try to get student info from parent document
+                    student_name = parent_data.get('student_name', 'N/A')
+                    student_grade = parent_data.get('grade', parent_data.get('Course', 'N/A'))
+                else:
+                    student_name = student_info.get('Name', student_info.get('name', parent_data.get('student_name', 'N/A')))
+                    student_grade = student_info.get('Course', student_info.get('course', student_info.get('grade', student_info.get('grade_level', parent_data.get('grade', 'N/A')))))
+                
+                # Get contact information
+                if student_info:
+                    student_email = student_info.get('Gmail', student_info.get('gmail', student_info.get('email', student_info.get('student_email', ''))))
+                    student_phone = student_info.get('Contact Number', student_info.get('contact_number', student_info.get('phone', student_info.get('student_phone', student_info.get('mobile', '')))))
+                    parent_email = student_info.get('Parent Gmail', student_info.get('parent_email', student_info.get('Parent Email', student_info.get('parent_email_address', ''))))
+                    parent_phone = student_info.get('Parent Phone Number') or student_info.get('parent_phone_number') or student_info.get('Parent Number') or student_info.get('parent_phone') or student_info.get('Parent Phone') or student_info.get('parent_contact_number') or student_info.get('parent_mobile') or ''
+                    # Strip whitespace from parent_phone if it exists
+                    if parent_phone:
+                        parent_phone = str(parent_phone).strip()
+                else:
+                    # Fallback to parent document if student_info not found
+                    student_email = parent_data.get('student_email', '')
+                    student_phone = parent_data.get('student_phone', '')
+                    parent_email = ''
+                    parent_phone = ''
+                
+                # Determine recipient type
+                recipient_type = "parents" if (parent_email or parent_phone) else "student"
+                
+                # Send notifications
+                email_success = False
+                sms_success = False
+                
+                if recipient_type == "parents":
+                    # Send to both parents and student
+                    if parent_email:
+                        print(f"   📧 Sending PARENT VIOLATION CLEARED EMAIL to {parent_email}...")
+                        parent_email_success = send_violation_cleared_email(parent_email, student_name, student_grade, current_time, "parents")
+                        if parent_email_success:
+                            email_success = True
+                    
+                    if student_email:
+                        print(f"   📧 Sending STUDENT VIOLATION CLEARED EMAIL to {student_email}...")
+                        student_email_success = send_violation_cleared_email(student_email, student_name, student_grade, current_time, "student")
+                        if student_email_success:
+                            email_success = True
+                    
+                    if parent_phone:
+                        print(f"   📱 Sending PARENT VIOLATION CLEARED SMS to {parent_phone}...")
+                        parent_sms_success = send_violation_cleared_sms(parent_phone, student_name, student_grade, current_time, "parents")
+                        if parent_sms_success:
+                            sms_success = True
+                    
+                    if student_phone:
+                        print(f"   📱 Sending STUDENT VIOLATION CLEARED SMS to {student_phone}...")
+                        student_sms_success = send_violation_cleared_sms(student_phone, student_name, student_grade, current_time, "student")
+                        if student_sms_success:
+                            sms_success = True
+                else:
+                    # Send to student only
+                    if student_email:
+                        print(f"   📧 Sending STUDENT VIOLATION CLEARED EMAIL to {student_email}...")
+                        student_email_success = send_violation_cleared_email(student_email, student_name, student_grade, current_time, "student")
+                        if student_email_success:
+                            email_success = True
+                    
+                    if student_phone:
+                        print(f"   📱 Sending STUDENT VIOLATION CLEARED SMS to {student_phone}...")
+                        student_sms_success = send_violation_cleared_sms(student_phone, student_name, student_grade, current_time, "student")
+                        if student_sms_success:
+                            sms_success = True
+                
+                if email_success or sms_success:
+                    notified_count += 1
+                    print(f"   ✅ Violation cleared notification sent successfully for {student_name}")
+                else:
+                    print(f"   ⚠️  Failed to send violation cleared notification for {student_name} (no valid contact info)")
+            
+            # Update tracking dictionary with current count
+            _previous_violation_counts[student_id] = current_count
+            
+            # Also update cache to reflect the reset
+            _violation_count_cache[student_id] = current_count
+        
+        # Check for students that exist in backup but not in current database (document was removed)
+        # These students had violations that were cleared when document was deleted
+        for student_id, backup_data in student_violations_backup.items():
+            if student_id not in current_student_ids:
+                backup_count = backup_data.get('violation_count', 0)
+                backup_count = int(backup_count) if backup_count else 0
+                
+                # If student had violations in backup but doesn't exist now, document was removed - send notification immediately
+                if backup_count > 0:
+                    print(f"\n   🎉 Detected violation document removal for student {student_id}: {backup_count} violations → removed")
+                    print(f"   📱 Sending immediate notification to student...")
+                    
+                    # Get student information from students collection (use student_id to find student)
+                    student_info = get_student_by_id(student_id, use_cache=True)
+                    
+                    # Also try using student_number from backup if student_id doesn't work
+                    if not student_info:
+                        student_number = backup_data.get('student_number', student_id)
+                        if student_number != student_id:
+                            student_info = get_student_by_id(student_number, use_cache=True)
+                    
+                    # Get student name and grade
+                    if student_info:
+                        student_name = student_info.get('Name', student_info.get('name', backup_data.get('student_name', 'N/A')))
+                        student_grade = student_info.get('Course', student_info.get('course', student_info.get('grade', student_info.get('grade_level', backup_data.get('grade', 'N/A')))))
+                    else:
+                        # Use backup data if student_info not found
+                        student_name = backup_data.get('student_name', 'N/A')
+                        student_grade = backup_data.get('grade', 'N/A')
+                    
+                    # Get contact information from students collection
+                    if student_info:
+                        student_email = student_info.get('Gmail', student_info.get('gmail', student_info.get('email', student_info.get('student_email', ''))))
+                        student_phone = student_info.get('Contact Number', student_info.get('contact_number', student_info.get('phone', student_info.get('student_phone', student_info.get('mobile', '')))))
+                        parent_email = student_info.get('Parent Gmail', student_info.get('parent_email', student_info.get('Parent Email', student_info.get('parent_email_address', ''))))
+                        parent_phone = student_info.get('Parent Phone Number') or student_info.get('parent_phone_number') or student_info.get('Parent Number') or student_info.get('parent_phone') or student_info.get('Parent Phone') or student_info.get('parent_contact_number') or student_info.get('parent_mobile') or ''
+                        # Strip whitespace from parent_phone if it exists
+                        if parent_phone:
+                            parent_phone = str(parent_phone).strip()
+                    else:
+                        # No contact info available if student not found
+                        student_email = ''
+                        student_phone = ''
+                        parent_email = ''
+                        parent_phone = ''
+                    
+                    # Determine recipient type
+                    recipient_type = "parents" if (parent_email or parent_phone) else "student"
+                    
+                    # Send notifications immediately
+                    email_success = False
+                    sms_success = False
+                    
+                    if recipient_type == "parents":
+                        # Send to both parents and student
+                        if parent_email:
+                            print(f"   📧 Sending PARENT VIOLATION CLEARED EMAIL to {parent_email}...")
+                            parent_email_success = send_violation_cleared_email(parent_email, student_name, student_grade, current_time, "parents")
+                            if parent_email_success:
+                                email_success = True
+                        
+                        if student_email:
+                            print(f"   📧 Sending STUDENT VIOLATION CLEARED EMAIL to {student_email}...")
+                            student_email_success = send_violation_cleared_email(student_email, student_name, student_grade, current_time, "student")
+                            if student_email_success:
+                                email_success = True
+                        
+                        if parent_phone:
+                            print(f"   📱 Sending PARENT VIOLATION CLEARED SMS to {parent_phone}...")
+                            parent_sms_success = send_violation_cleared_sms(parent_phone, student_name, student_grade, current_time, "parents")
+                            if parent_sms_success:
+                                sms_success = True
+                        
+                        if student_phone:
+                            print(f"   📱 Sending STUDENT VIOLATION CLEARED SMS to {student_phone}...")
+                            student_sms_success = send_violation_cleared_sms(student_phone, student_name, student_grade, current_time, "student")
+                            if student_sms_success:
+                                sms_success = True
+                    else:
+                        # Send to student only
+                        if student_email:
+                            print(f"   📧 Sending STUDENT VIOLATION CLEARED EMAIL to {student_email}...")
+                            student_email_success = send_violation_cleared_email(student_email, student_name, student_grade, current_time, "student")
+                            if student_email_success:
+                                email_success = True
+                        
+                        if student_phone:
+                            print(f"   📱 Sending STUDENT VIOLATION CLEARED SMS to {student_phone}...")
+                            student_sms_success = send_violation_cleared_sms(student_phone, student_name, student_grade, current_time, "student")
+                            if student_sms_success:
+                                sms_success = True
+                    
+                    if email_success or sms_success:
+                        notified_count += 1
+                        print(f"   ✅ Violation cleared notification sent successfully for {student_name} (document removed)")
+                    else:
+                        print(f"   ⚠️  Failed to send violation cleared notification for {student_name} (no valid contact info found in students collection)")
+                    
+                    # Update tracking to mark as notified (set to 0 since document is removed)
+                    _previous_violation_counts[student_id] = 0
+                    _violation_count_cache[student_id] = 0
+        
+        return notified_count
+        
+    except Exception as e:
+        print(f"[ERROR] Error checking for violation resets: {str(e)}")
+        return 0
 
 def get_student_by_id(student_id, use_cache=True):
     """
@@ -1759,6 +2514,49 @@ print("=" * 70)
 # Initialize Firebase
 try:
     db = initialize_firebase()
+    
+    # Load cache from local files first
+    print("\n📂 Loading cache from local files...")
+    loaded_violation_cache, loaded_previous_counts, loaded_student_violations_backup = load_cache_from_file()
+    
+    # Merge loaded cache with global cache (loaded cache takes precedence for existing keys)
+    if loaded_violation_cache:
+        _violation_count_cache.update(loaded_violation_cache)
+        print(f"   ✅ Merged {len(loaded_violation_cache)} violation count cache entries")
+    
+    if loaded_previous_counts:
+        _previous_violation_counts.update(loaded_previous_counts)
+        print(f"   ✅ Merged {len(loaded_previous_counts)} previous violation count entries")
+    
+    # Initialize violation count tracking by reading all current violation counts
+    # This ensures we have baseline data to detect resets (updates existing entries)
+    print("\n📊 Initializing violation count tracking from Firebase...")
+    try:
+        student_violations_ref = db.collection("student_violations")
+        all_docs = student_violations_ref.stream()
+        init_count = 0
+        updated_count = 0
+        for doc in all_docs:
+            parent_data = doc.to_dict()
+            current_count = parent_data.get('violation_count', 0)
+            current_count = int(current_count) if current_count else 0
+            
+            # Update tracking (will overwrite loaded cache if different)
+            if doc.id in _previous_violation_counts:
+                if _previous_violation_counts[doc.id] != current_count:
+                    updated_count += 1
+            _previous_violation_counts[doc.id] = current_count
+            _violation_count_cache[doc.id] = current_count
+            init_count += 1
+        print(f"   ✅ Initialized tracking for {init_count} student(s) ({updated_count} updated from Firebase)")
+    except Exception as e:
+        print(f"   ⚠️  Warning: Could not initialize violation count tracking: {str(e)}")
+        print(f"   ℹ️  System will still work, but may miss resets that occur immediately after startup")
+    
+    # Save updated cache to file after initialization
+    print("\n💾 Saving cache to local files...")
+    save_cache_to_file()
+    
     print("✅ Firebase initialized successfully")
 except Exception as e:
     print(f"❌ Error initializing Firebase: {str(e)}")
@@ -2130,7 +2928,10 @@ while running:
                 
                 # Extract parent information
                 parent_email = student_info.get('Parent Gmail', student_info.get('parent_email', student_info.get('Parent Email', student_info.get('parent_email_address', ''))))
-                parent_phone = student_info.get('Parent Number', student_info.get('parent_phone', student_info.get('Parent Phone', student_info.get('parent_contact_number', student_info.get('parent_mobile', '')))))
+                parent_phone = student_info.get('Parent Phone Number') or student_info.get('parent_phone_number') or student_info.get('Parent Number') or student_info.get('parent_phone') or student_info.get('Parent Phone') or student_info.get('parent_contact_number') or student_info.get('parent_mobile') or ''
+                # Strip whitespace from parent_phone if it exists
+                if parent_phone:
+                    parent_phone = str(parent_phone).strip()
                 
                 # Extract violation information from violation log document
                 # Priority: Use "details" field directly from the violation log
@@ -2481,7 +3282,10 @@ while running:
                 
                 # Extract parent information
                 parent_email = student_info.get('Parent Gmail', student_info.get('parent_email', student_info.get('Parent Email', student_info.get('parent_email_address', ''))))
-                parent_phone = student_info.get('Parent Number', student_info.get('parent_phone', student_info.get('Parent Phone', student_info.get('parent_contact_number', student_info.get('parent_mobile', '')))))
+                parent_phone = student_info.get('Parent Phone Number') or student_info.get('parent_phone_number') or student_info.get('Parent Number') or student_info.get('parent_phone') or student_info.get('Parent Phone') or student_info.get('parent_contact_number') or student_info.get('parent_mobile') or ''
+                # Strip whitespace from parent_phone if it exists
+                if parent_phone:
+                    parent_phone = str(parent_phone).strip()
                 
                 # Extract activity information
                 # Check multiple possible field names: activity_type, action_type, type
@@ -2625,6 +3429,21 @@ while running:
             print(f"\n   ✅ Activities processing complete!")
             print(f"   📊 Activity reads this cycle: {activity_reads_this_cycle}")
         
+        # STEP 5: Check for violation count resets (3+ to 0) - Community Service completed
+        print(f"\n   📋 Step 5: Checking for violation count resets (Community Service completed)...")
+        reset_notified_count = check_and_notify_violation_resets()
+        if reset_notified_count > 0:
+            print(f"   ✅ Violation reset notifications sent: {reset_notified_count} student(s) notified")
+        else:
+            print(f"   ✓ No violation resets detected (or all students already notified)")
+        
+        # Save cache to file periodically (after each cycle)
+        # Only print if there were changes or every 10 cycles to reduce verbosity
+        verbose_save = (cycle_count % 10 == 0 or reset_notified_count > 0)
+        if verbose_save:
+            print(f"\n   💾 Saving cache to local files...")
+        save_cache_to_file(verbose=verbose_save)
+        
         # Wait before next check (using configurable interval)
         if running:
             print(f"\n   ⏳ Waiting {POLLING_INTERVAL_SECONDS} seconds before next check...")
@@ -2632,6 +3451,11 @@ while running:
             
     except KeyboardInterrupt:
         print("\n\n🛑 Interrupted by user. Shutting down...")
+        
+        # Save cache before shutting down
+        print("\n💾 Saving cache to local files before shutdown...")
+        save_cache_to_file()
+        
         total_reads = total_violation_reads + total_student_reads
         cache_stats = get_cache_stats()
         print(f"📊 Total Firebase reads during this session: {total_reads:,}")
